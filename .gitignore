@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# venv
+venv/
+.venv/
+
+# local DB files
+*.db
+test.db
+
+# pytest
+.pytest_cache/
+
+# env files
+.env
+
+# OS
+.DS_Store
