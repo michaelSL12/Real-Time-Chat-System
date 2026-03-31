@@ -337,22 +337,40 @@ alembic revision --autogenerate -m "description"
 
 ---
 
-# Running the Project (Docker)
+## ⚡ Quick Start
 
-Start all services:
+Start the project for the first time:
 
-```
+```bash
 docker-compose up --build
 ```
 
-Services:
+For later runs:
+
+```bash
+docker-compose up
+```
+
+Stop the project:
+
+```bash
+docker-compose down
+```
+
+### Services
 
 | Service     | Port |
-| ----------- | ---- |
+|------------|------|
 | Backend API | 8000 |
 | Frontend    | 5173 |
 | PostgreSQL  | 5433 |
 
+- Backend API: http://127.0.0.1:8000  
+- API Docs: http://127.0.0.1:8000/docs  
+- Frontend: http://127.0.0.1:5173  
+
+> PostgreSQL data is stored in a Docker volume, so it persists between runs unless the volume is removed explicitly.  
+> Warning: `docker-compose down -v` will remove the database and reset all data.
 ---
 
 # Running Locally
@@ -476,6 +494,25 @@ The frontend connects to the backend via:
 
 * REST API endpoints
 * WebSocket events for live chat updates
+
+---
+
+## 📷 Screenshots
+
+### Authentication
+Login and registration flow for secure user access.
+
+![Authentication](./screenshots/login.png)
+
+### Real-Time Messaging
+Live chat interface with WebSocket-based communication.
+
+![Chat Room](./screenshots/chat-room.png)
+
+### Room Management
+Support for public and private rooms with user-based access control.
+
+![Private Room](./screenshots/private-room.png)
 
 ---
 
