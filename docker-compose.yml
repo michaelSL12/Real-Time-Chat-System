@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  # PostgreSQL database used by the backend.
+  db:
+    image: postgres:16
+    container_name: chat_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: chat
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # FastAPI backend application.
+  backend:
+    build:
+      context: .
+    container_name: chat_backend
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@db:5432/chat
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    command: >
+      sh -c "alembic -c /app/alembic.ini upgrade head &&
+             uvicorn main:app --host 0.0.0.0 --port 8000"
+
+  # Vite frontend development server.
+  frontend:
+    build:
+      context: ./frontend
+    container_name: chat_frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:

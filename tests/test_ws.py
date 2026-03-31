@@ -1,233 +1,257 @@
-# tests/test_ws.py
-import uuid
+"""
+WebSocket room tests.
+
+This file tests the real-time WebSocket behavior of the application.
+It verifies connection authentication, access control for public and
+private rooms, ping/pong behavior, message sending rules, database
+persistence, and broadcasting messages to multiple connected clients.
+"""
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
-from models import User
 
-from models import Message
-
-
-def _unique_user():
-    return f"user_{uuid.uuid4().hex[:8]}", "pass123"
+from models import Message, User
+from tests.helper import auth_headers, create_room, join_room, login, register, unique_user
 
 
-def _register(client: TestClient, username: str, password: str):
-    r = client.post("/auth/register", json={"username": username, "password": password})
-    assert r.status_code in (200, 201), r.text
+CONNECTED_EVENT_TYPE = "connected"
+ERROR_EVENT_TYPE = "error"
+MESSAGE_EVENT_TYPE = "message"
+PING_EVENT_TYPE = "ping"
+PONG_EVENT_TYPE = "pong"
 
-
-def _login_and_get_token(client: TestClient, username: str, password: str) -> str:
-    # login expects form data (OAuth2PasswordRequestForm)
-    r = client.post("/auth/login", data={"username": username, "password": password})
-    assert r.status_code == 200, r.text
-    data = r.json()
-    assert "access_token" in data, data
-    return data["access_token"]
-
-
-def _auth_headers(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _create_room(client: TestClient, token: str, is_private: bool):
-    name = f"room_{uuid.uuid4().hex[:8]}"
-    r = client.post(
-        "/rooms",
-        headers=_auth_headers(token),
-        json={"name": name, "description": "d", "is_private": is_private},
-    )
-    assert r.status_code == 200, r.text
-    return r.json()["id"]
-
-
-def _join_room(client: TestClient, token: str, room_id: int):
-    r = client.post(f"/rooms/{room_id}/join", headers=_auth_headers(token))
-    # depending on your API, joining might be 200 or 204
-    assert r.status_code in (200, 204), r.text
+HTTP_200_OK = 200
+HTTP_204_NO_CONTENT = 204
 
 
 def test_ws_connect_with_query_token(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
+    """
+    Verify that a WebSocket connection succeeds when the token is passed
+    in the query string.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
 
-    room_id = _create_room(client, token, is_private=False)
+    room = create_room(client, token, "room-query", is_private=False)
+    room_id = room["id"]
 
     with client.websocket_connect(f"/ws/rooms/{room_id}?token={token}") as ws:
-        msg = ws.receive_json()
-        assert msg["type"] == "connected"
-        assert msg["room_id"] == room_id
+        payload = ws.receive_json()
+        assert payload["type"] == CONNECTED_EVENT_TYPE
+        assert payload["room_id"] == room_id
 
 
 def test_ws_connect_with_auth_header(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
+    """
+    Verify that a WebSocket connection succeeds when the token is passed
+    in the Authorization header.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
 
-    room_id = _create_room(client, token, is_private=False)
+    room = create_room(client, token, "room-header", is_private=False)
+    room_id = room["id"]
 
     with client.websocket_connect(
         f"/ws/rooms/{room_id}",
-        headers=_auth_headers(token),
+        headers=auth_headers(token),
     ) as ws:
-        msg = ws.receive_json()
-        assert msg["type"] == "connected"
-        assert msg["room_id"] == room_id
+        payload = ws.receive_json()
+        assert payload["type"] == CONNECTED_EVENT_TYPE
+        assert payload["room_id"] == room_id
 
 
 def test_ws_rejects_missing_token(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
-    room_id = _create_room(client, token, is_private=False)
+    """
+    Verify that a WebSocket connection is rejected when no token is provided.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
+
+    room = create_room(client, token, "room-missing-token", is_private=False)
+    room_id = room["id"]
 
     with pytest.raises((WebSocketDenialResponse, WebSocketDisconnect)):
-        with client.websocket_connect(f"/ws/rooms/{room_id}") as ws:
+        with client.websocket_connect(f"/ws/rooms/{room_id}"):
             pass
 
 
 def test_ws_rejects_invalid_token(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
-    room_id = _create_room(client, token, is_private=False)
+    """
+    Verify that a WebSocket connection is rejected when the token is invalid.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
 
-    bad = "this.is.not.a.jwt"
+    room = create_room(client, token, "room-invalid-token", is_private=False)
+    room_id = room["id"]
+
+    bad_token = "this.is.not.a.jwt"
+
     with pytest.raises((WebSocketDenialResponse, WebSocketDisconnect)):
-        with client.websocket_connect(f"/ws/rooms/{room_id}?token={bad}") as ws:
+        with client.websocket_connect(f"/ws/rooms/{room_id}?token={bad_token}"):
             pass
 
 
 def test_ws_private_room_denied_if_not_member(client: TestClient, db_session: Session):
-    owner_u, owner_p = _unique_user()
-    _register(client, owner_u, owner_p)
-    owner_token = _login_and_get_token(client, owner_u, owner_p)
+    """
+    Verify that a user cannot connect to a private room unless they are a member.
+    """
+    owner_username, owner_password = unique_user()
+    register(client, owner_username, owner_password)
+    owner_token = login(client, owner_username, owner_password)["access_token"]
 
-    room_id = _create_room(client, owner_token, is_private=True)
+    room = create_room(client, owner_token, "private-denied", is_private=True)
+    room_id = room["id"]
 
-    other_u, other_p = _unique_user()
-    _register(client, other_u, other_p)
-    other_token = _login_and_get_token(client, other_u, other_p)
+    other_username, other_password = unique_user()
+    register(client, other_username, other_password)
+    other_token = login(client, other_username, other_password)["access_token"]
 
     with pytest.raises((WebSocketDenialResponse, WebSocketDisconnect)):
-        with client.websocket_connect(f"/ws/rooms/{room_id}?token={other_token}") as ws:
+        with client.websocket_connect(f"/ws/rooms/{room_id}?token={other_token}"):
             pass
 
 
 def test_ws_private_room_allowed_after_invite(client: TestClient, db_session: Session):
-    owner_u, owner_p = _unique_user()
-    _register(client, owner_u, owner_p)
-    owner_token = _login_and_get_token(client, owner_u, owner_p)
+    """
+    Verify that an invited user can connect to a private room.
+    """
+    owner_username, owner_password = unique_user()
+    register(client, owner_username, owner_password)
+    owner_token = login(client, owner_username, owner_password)["access_token"]
 
-    room_id = _create_room(client, owner_token, is_private=True)
+    room = create_room(client, owner_token, "private-invited", is_private=True)
+    room_id = room["id"]
 
-    other_u, other_p = _unique_user()
-    _register(client, other_u, other_p)
-    other_token = _login_and_get_token(client, other_u, other_p)
+    other_username, other_password = unique_user()
+    register(client, other_username, other_password)
+    other_token = login(client, other_username, other_password)["access_token"]
 
-    other_user_id = db_session.query(User).filter(User.username == other_u).one().id
+    invited_user_id = db_session.query(User).filter(User.username == other_username).one().id
 
-    inv = client.post(
-        f"/rooms/{room_id}/invite/{other_user_id}",
-        headers=_auth_headers(owner_token),
+    invite_response = client.post(
+        f"/rooms/{room_id}/invite/{invited_user_id}",
+        headers=auth_headers(owner_token),
     )
-    assert inv.status_code in (200, 204), inv.text
+    assert invite_response.status_code in (HTTP_200_OK, HTTP_204_NO_CONTENT), invite_response.text
 
     with client.websocket_connect(f"/ws/rooms/{room_id}?token={other_token}") as ws:
-        msg = ws.receive_json()
-        assert msg["type"] == "connected"
+        payload = ws.receive_json()
+        assert payload["type"] == CONNECTED_EVENT_TYPE
 
 
 def test_ws_ping_pong(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
-    room_id = _create_room(client, token, is_private=False)
+    """
+    Verify that the WebSocket endpoint responds to ping messages.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
+
+    room = create_room(client, token, "room-ping", is_private=False)
+    room_id = room["id"]
 
     with client.websocket_connect(f"/ws/rooms/{room_id}?token={token}") as ws:
-        ws.receive_json()  # connected
-        ws.send_json({"type": "ping"})
-        out = ws.receive_json()
-        assert out["type"] == "pong"
+        ws.receive_json()
+        ws.send_json({"type": PING_EVENT_TYPE})
+
+        payload = ws.receive_json()
+        assert payload["type"] == PONG_EVENT_TYPE
+
 
 def test_ws_send_message_requires_membership(client: TestClient, db_session: Session):
-    # owner creates room
-    owner_u, owner_p = _unique_user()
-    _register(client, owner_u, owner_p)
-    owner_token = _login_and_get_token(client, owner_u, owner_p)
-    room_id = _create_room(client, owner_token, is_private=False)
+    """
+    Verify that sending a message requires room membership.
+    """
+    owner_username, owner_password = unique_user()
+    register(client, owner_username, owner_password)
+    owner_token = login(client, owner_username, owner_password)["access_token"]
 
-    # second user (not owner) tries to post without joining
-    u2, p2 = _unique_user()
-    _register(client, u2, p2)
-    token2 = _login_and_get_token(client, u2, p2)
+    room = create_room(client, owner_token, "room-membership", is_private=False)
+    room_id = room["id"]
 
-    with client.websocket_connect(f"/ws/rooms/{room_id}?token={token2}") as ws:
-        ws.receive_json()  # connected
+    other_username, other_password = unique_user()
+    register(client, other_username, other_password)
+    other_token = login(client, other_username, other_password)["access_token"]
 
-        ws.send_json({"type": "message", "content": "hello"})
+    with client.websocket_connect(f"/ws/rooms/{room_id}?token={other_token}") as ws:
+        ws.receive_json()
+        ws.send_json({"type": MESSAGE_EVENT_TYPE, "content": "hello"})
+
         try:
-            out = ws.receive_json()
-            # server might send an error payload
-            assert out.get("type") == "error" or "detail" in out
+            payload = ws.receive_json()
+            assert payload.get("type") == ERROR_EVENT_TYPE or "detail" in payload
         except (WebSocketDisconnect, WebSocketDenialResponse):
-            # or it may close/deny
             pass
 
 
 def test_ws_send_message_persists_and_broadcasts(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
-    room_id = _create_room(client, token, is_private=False)
+    """
+    Verify that a valid message is stored in the database and broadcast
+    back through the WebSocket connection.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
 
-    # join before posting (matches your authz rule)
-    _join_room(client, token, room_id)
+    room = create_room(client, token, "room-persist", is_private=False)
+    room_id = room["id"]
 
     with client.websocket_connect(f"/ws/rooms/{room_id}?token={token}") as ws:
-        ws.receive_json()  # connected
+        ws.receive_json()
 
-        ws.send_json({"type": "message", "content": "hello"})
-        out = ws.receive_json()
-        assert out["type"] == "message"
-        assert out["content"] == "hello"
-        assert out["room_id"] == room_id
-        assert isinstance(out["id"], int)
+        ws.send_json({"type": MESSAGE_EVENT_TYPE, "content": "hello"})
+        payload = ws.receive_json()
 
-        msg_id = out["id"]
-        m = db_session.query(Message).filter(Message.id == msg_id).one()
-        assert m.content == "hello"
+        assert payload["type"] == MESSAGE_EVENT_TYPE
+        assert payload["content"] == "hello"
+        assert payload["room_id"] == room_id
+        assert isinstance(payload["id"], int)
+
+        message_id = payload["id"]
+        message = db_session.query(Message).filter(Message.id == message_id).one()
+        assert message.content == "hello"
 
 
 def test_ws_broadcast_to_two_clients(client: TestClient, db_session: Session):
-    # Two different users join same public room; when one sends, both receive.
-    u1, p1 = _unique_user()
-    _register(client, u1, p1)
-    t1 = _login_and_get_token(client, u1, p1)
+    """
+    Verify that a message sent by one connected client is broadcast
+    to all connected clients in the same room.
+    """
+    username_one, password_one = unique_user()
+    register(client, username_one, password_one)
+    token_one = login(client, username_one, password_one)["access_token"]
 
-    room_id = _create_room(client, t1, is_private=False)
-    _join_room(client, t1, room_id)
+    room = create_room(client, token_one, "room-broadcast", is_private=False)
+    room_id = room["id"]
 
-    u2, p2 = _unique_user()
-    _register(client, u2, p2)
-    t2 = _login_and_get_token(client, u2, p2)
-    _join_room(client, t2, room_id)
+    username_two, password_two = unique_user()
+    register(client, username_two, password_two)
+    token_two = login(client, username_two, password_two)["access_token"]
+    join_room(client, token_two, room_id)
 
-    with client.websocket_connect(f"/ws/rooms/{room_id}?token={t1}") as ws1:
-        ws1.receive_json()  # connected
-        with client.websocket_connect(f"/ws/rooms/{room_id}?token={t2}") as ws2:
-            ws2.receive_json()  # connected
+    with client.websocket_connect(f"/ws/rooms/{room_id}?token={token_one}") as ws_one:
+        ws_one.receive_json()
 
-            ws1.send_json({"type": "message", "content": "hey"})
-            msg1 = ws1.receive_json()
-            msg2 = ws2.receive_json()
+        with client.websocket_connect(f"/ws/rooms/{room_id}?token={token_two}") as ws_two:
+            ws_two.receive_json()
 
-            assert msg1["type"] == "message"
-            assert msg2["type"] == "message"
-            assert msg1["content"] == "hey"
-            assert msg2["content"] == "hey"
-            assert msg1["id"] == msg2["id"]
+            ws_one.send_json({"type": MESSAGE_EVENT_TYPE, "content": "hey"})
+            payload_one = ws_one.receive_json()
+            payload_two = ws_two.receive_json()
+
+            assert payload_one["type"] == MESSAGE_EVENT_TYPE
+            assert payload_two["type"] == MESSAGE_EVENT_TYPE
+
+            assert payload_one["content"] == "hey"
+            assert payload_two["content"] == "hey"
+
+            assert payload_one["id"] == payload_two["id"]

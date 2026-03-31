@@ -1,30 +1,63 @@
-def register(client, username: str, password: str = "password123"):
-    return client.post("/auth/register", json={"username": username, "password": password})
+"""
+Logout-all authentication tests.
 
-def login(client, username: str, password: str = "password123"):
-    r = client.post("/auth/login", data={"username": username, "password": password})
-    assert r.status_code == 200
-    return r.json()
+This file tests the logout-all flow of the application.
+Its purpose is to verify that when a user logs out from all sessions,
+every active refresh token is revoked and can no longer be used.
+"""
 
-def auth_headers(token: str):
-    return {"Authorization": f"Bearer {token}"}
+from tests.helper import auth_headers, login, register
+
+
+LOGOUT_ALL_URL = "/auth/logout_all"
+REFRESH_URL = "/auth/refresh"
+
+HTTP_200_OK = 200
+HTTP_401_UNAUTHORIZED = 401
+
+STATUS_LOGGED_OUT_ALL = "logged_out_all"
+
 
 def test_logout_all_revokes_all_refresh_tokens(client):
+    """
+    Verify that logging out from all sessions revokes every refresh token.
+
+    This test:
+    - registers a user
+    - logs in twice to simulate two active sessions or devices
+    - calls the logout-all endpoint using a valid access token
+    - checks that the logout request succeeds
+    - verifies that at least two refresh tokens were revoked
+    - confirms that both old refresh tokens can no longer be used
+
+    Expected result:
+        Both refresh attempts return 401 after logout-all.
+    """
     register(client, "alice")
 
-    t1 = login(client, "alice")
-    t2 = login(client, "alice")  # second session/device
-    access = t1["access_token"]
+    session_one = login(client, "alice")
+    session_two = login(client, "alice")
+    access_token = session_one["access_token"]
 
-    # logout all sessions
-    r = client.post("/auth/logout_all", headers=auth_headers(access))
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "logged_out_all"
+    response = client.post(
+        LOGOUT_ALL_URL,
+        headers=auth_headers(access_token),
+    )
+
+    assert response.status_code == HTTP_200_OK
+
+    body = response.json()
+    assert body["status"] == STATUS_LOGGED_OUT_ALL
     assert body["revoked"] >= 2
 
-    # both refresh tokens should now fail
-    r1 = client.post("/auth/refresh", json={"refresh_token": t1["refresh_token"]})
-    r2 = client.post("/auth/refresh", json={"refresh_token": t2["refresh_token"]})
-    assert r1.status_code == 401
-    assert r2.status_code == 401
+    refresh_response_one = client.post(
+        REFRESH_URL,
+        json={"refresh_token": session_one["refresh_token"]},
+    )
+    refresh_response_two = client.post(
+        REFRESH_URL,
+        json={"refresh_token": session_two["refresh_token"]},
+    )
+
+    assert refresh_response_one.status_code == HTTP_401_UNAUTHORIZED
+    assert refresh_response_two.status_code == HTTP_401_UNAUTHORIZED

@@ -1,1 +1,29 @@
-Generic single-database configuration.
+# Alembic Migrations
+
+This directory contains the database migration setup for the project.
+
+## Files
+
+- `env.py` — connects Alembic to the application's SQLAlchemy metadata and runs migrations
+- `versions/` — contains individual migration revision files
+- `script.py.mako` — template used when generating new migration files
+
+## Commands
+
+Create a new migration:
+
+`alembic revision --autogenerate -m "describe_change"`
+
+Apply all migrations:
+
+`alembic upgrade head`
+
+Rollback one migration:
+
+`alembic downgrade -1`
+
+## Notes
+
+- Alembic uses `Base.metadata` from the application to detect schema changes
+- The default database URL is configured in `alembic.ini`
+- For tests, the database URL can be overridden programmatically

@@ -14,6 +14,7 @@ test.db
 
 # pytest
 .pytest_cache/
+.coverage
 
 # env files
 .env

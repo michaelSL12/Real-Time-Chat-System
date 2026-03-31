@@ -1,29 +1,73 @@
-# tests/test_read_receipts.py
-import uuid
+"""
+Read-receipt tests.
 
-import pytest
+This file tests both REST and WebSocket read-receipt behavior.
+It verifies that read markers are stored correctly, never move
+backwards, are broadcast to other connected clients, and invalid
+read events are rejected without breaking the connection.
+
+Local helpers in this file are used to:
+- post messages
+- receive websocket messages with a timeout
+"""
+
+import threading
+from typing import Any
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from models import User, Message, MessageRead
+from models import MessageRead, User
+from tests.helper import (
+    auth_headers,
+    create_room,
+    join_room,
+    login,
+    register,
+    unique_user,
+)
 
-import json
-import threading
 
-def recv_json_with_timeout(ws, timeout: float = 1.0):
-    result = {"data": None, "err": None}
+CONNECTED_EVENT_TYPE = "connected"
+ERROR_EVENT_TYPE = "error"
+PING_EVENT_TYPE = "ping"
+PONG_EVENT_TYPE = "pong"
+READ_EVENT_TYPE = "read"
 
-    def _target():
+HTTP_200_OK = 200
+
+
+def recv_json_with_timeout(ws, timeout: float = 1.0) -> dict[str, Any]:
+    """
+    Receive a JSON message from a WebSocket with a timeout.
+
+    This helper runs receive_json() in a background thread so the test
+    does not block forever if no message arrives.
+
+    Args:
+        ws: Active WebSocket test connection.
+        timeout: Maximum number of seconds to wait.
+
+    Returns:
+        The received JSON payload.
+
+    Raises:
+        TimeoutError: If no message arrives before the timeout.
+        Exception: Re-raises any exception produced by receive_json().
+    """
+    result: dict[str, Any] = {"data": None, "err": None}
+
+    def _target() -> None:
         try:
             result["data"] = ws.receive_json()
-        except Exception as e:
-            result["err"] = e
+        except Exception as exc:
+            result["err"] = exc
 
-    t = threading.Thread(target=_target, daemon=True)
-    t.start()
-    t.join(timeout)
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join(timeout)
 
-    if t.is_alive():
+    if thread.is_alive():
         raise TimeoutError("Timed out waiting for websocket message")
 
     if result["err"] is not None:
@@ -31,160 +75,197 @@ def recv_json_with_timeout(ws, timeout: float = 1.0):
 
     return result["data"]
 
-def _unique_user():
-    return f"user_{uuid.uuid4().hex[:8]}", "pass123"
 
-
-def _register(client: TestClient, username: str, password: str):
-    r = client.post("/auth/register", json={"username": username, "password": password})
-    assert r.status_code in (200, 201), r.text
-
-
-def _login_and_get_token(client: TestClient, username: str, password: str) -> str:
-    r = client.post("/auth/login", data={"username": username, "password": password})
-    assert r.status_code == 200, r.text
-    data = r.json()
-    assert "access_token" in data, data
-    return data["access_token"]
-
-
-def _auth_headers(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _create_public_room(client: TestClient, token: str) -> int:
-    r = client.post(
-        "/rooms",
-        headers=_auth_headers(token),
-        json={"name": f"room_{uuid.uuid4().hex[:8]}", "description": "d", "is_private": False},
-    )
-    assert r.status_code == 200, r.text
-    return r.json()["id"]
-
-
-def _join_room(client: TestClient, token: str, room_id: int):
-    r = client.post(f"/rooms/{room_id}/join", headers=_auth_headers(token))
-    assert r.status_code in (200, 204), r.text
-
-
-def _post_message(client: TestClient, token: str, room_id: int, content: str) -> int:
-    r = client.post(
+def _post_message(
+    client: TestClient,
+    token: str,
+    room_id: int,
+    content: str,
+) -> int:
+    """
+    Post a message to a room through the REST API and return its message ID.
+    """
+    response = client.post(
         f"/rooms/{room_id}/messages",
-        headers=_auth_headers(token),
+        headers=auth_headers(token),
         json={"content": content},
     )
-    assert r.status_code == 200, r.text
-    return r.json()["id"]
+    assert response.status_code == HTTP_200_OK, response.text
+    return response.json()["id"]
 
 
 def test_rest_mark_read_creates_row(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
+    """
+    Verify that marking a message as read through the REST API creates
+    or updates a MessageRead row in the database.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
 
-    room_id = _create_public_room(client, token)
-    _join_room(client, token, room_id)
+    room = create_room(client, token, "read-room-1")
+    room_id = room["id"]
+    join_room(client, token, room_id)
 
-    msg_id = _post_message(client, token, room_id, "hello")
+    message_id = _post_message(client, token, room_id, "hello")
 
-    r = client.post(f"/rooms/{room_id}/read/{msg_id}", headers=_auth_headers(token))
-    assert r.status_code == 200, r.text
-    body = r.json()
+    response = client.post(
+        f"/rooms/{room_id}/read/{message_id}",
+        headers=auth_headers(token),
+    )
+    assert response.status_code == HTTP_200_OK, response.text
+
+    body = response.json()
     assert body["room_id"] == room_id
-    assert body["last_read_message_id"] == msg_id
+    assert body["last_read_message_id"] == message_id
 
-    user_id = db_session.query(User).filter(User.username == u).one().id
-    mr = db_session.query(MessageRead).filter(
+    user_id = db_session.query(User).filter(User.username == username).one().id
+    read_state = db_session.query(MessageRead).filter(
         MessageRead.room_id == room_id,
         MessageRead.user_id == user_id,
     ).one()
-    assert mr.last_read_message_id == msg_id
+
+    assert read_state.last_read_message_id == message_id
 
 
-def test_rest_mark_read_does_not_move_backwards(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
+def test_rest_mark_read_does_not_move_backwards(
+    client: TestClient,
+    db_session: Session,
+):
+    """
+    Verify that the read marker never moves backwards.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
 
-    room_id = _create_public_room(client, token)
-    _join_room(client, token, room_id)
+    room = create_room(client, token, "read-room-2")
+    room_id = room["id"]
+    join_room(client, token, room_id)
 
-    m1 = _post_message(client, token, room_id, "m1")
-    m2 = _post_message(client, token, room_id, "m2")
+    first_message_id = _post_message(client, token, room_id, "m1")
+    second_message_id = _post_message(client, token, room_id, "m2")
 
-    # mark read at m2
-    r = client.post(f"/rooms/{room_id}/read/{m2}", headers=_auth_headers(token))
-    assert r.status_code == 200, r.text
-    assert r.json()["last_read_message_id"] == m2
+    response = client.post(
+        f"/rooms/{room_id}/read/{second_message_id}",
+        headers=auth_headers(token),
+    )
+    assert response.status_code == HTTP_200_OK, response.text
+    assert response.json()["last_read_message_id"] == second_message_id
 
-    # try to mark read backwards to m1 -> should stay at m2 (if you implemented "only move forward")
-    r2 = client.post(f"/rooms/{room_id}/read/{m1}", headers=_auth_headers(token))
-    assert r2.status_code == 200, r2.text
-    assert r2.json()["last_read_message_id"] == m2
+    earlier_response = client.post(
+        f"/rooms/{room_id}/read/{first_message_id}",
+        headers=auth_headers(token),
+    )
+    assert earlier_response.status_code == HTTP_200_OK, earlier_response.text
+    assert earlier_response.json()["last_read_message_id"] == second_message_id
 
 
-def test_ws_read_broadcasts_to_other_clients(client: TestClient, db_session: Session):
-    # user1 creates room + posts messages
-    u1, p1 = _unique_user()
-    _register(client, u1, p1)
-    t1 = _login_and_get_token(client, u1, p1)
+def test_ws_read_broadcasts_to_other_clients(
+    client: TestClient,
+    db_session: Session,
+):
+    """
+    Verify that a WebSocket read event is broadcast to other connected
+    clients in the same room and stored in the database.
+    """
+    username_one, password_one = unique_user()
+    register(client, username_one, password_one)
+    token_one = login(client, username_one, password_one)["access_token"]
 
-    room_id = _create_public_room(client, t1)
-    _join_room(client, t1, room_id)
+    room = create_room(client, token_one, "read-room-3")
+    room_id = room["id"]
+    join_room(client, token_one, room_id)
 
-    msg_id = _post_message(client, t1, room_id, "hello")
+    message_id = _post_message(client, token_one, room_id, "hello")
 
-    # user2 joins room
-    u2, p2 = _unique_user()
-    _register(client, u2, p2)
-    t2 = _login_and_get_token(client, u2, p2)
-    _join_room(client, t2, room_id)
+    username_two, password_two = unique_user()
+    register(client, username_two, password_two)
+    token_two = login(client, username_two, password_two)["access_token"]
+    join_room(client, token_two, room_id)
 
-    user2_id = db_session.query(User).filter(User.username == u2).one().id
+    user_two_id = db_session.query(User).filter(User.username == username_two).one().id
 
-    # two ws connections
-    with client.websocket_connect(f"/ws/rooms/{room_id}?token={t1}") as ws1:
-        ws1.receive_json()  # connected
-        with client.websocket_connect(f"/ws/rooms/{room_id}?token={t2}") as ws2:
-            ws2.receive_json()  # connected
+    with client.websocket_connect(f"/ws/rooms/{room_id}?token={token_one}") as ws_one:
+        ws_one.receive_json()
 
-            # user2 sends read event
-            ws2.send_json({"type": "read", "message_id": msg_id})
+        with client.websocket_connect(f"/ws/rooms/{room_id}?token={token_two}") as ws_two:
+            ws_two.receive_json()
 
-            # user1 should receive broadcast
-            out = recv_json_with_timeout(ws1, timeout=1.0)
-            assert out["type"] == "read"
-            assert out["room_id"] == room_id
-            assert out["user_id"] == user2_id
-            assert out["last_read_message_id"] == msg_id
+            ws_two.send_json({"type": READ_EVENT_TYPE, "message_id": message_id})
 
-    # DB row should be updated too
-    mr = db_session.query(MessageRead).filter(
+            payload = recv_json_with_timeout(ws_one, timeout=1.0)
+            assert payload["type"] == READ_EVENT_TYPE
+            assert payload["room_id"] == room_id
+            assert payload["user_id"] == user_two_id
+            assert payload["last_read_message_id"] == message_id
+
+    read_state = db_session.query(MessageRead).filter(
         MessageRead.room_id == room_id,
-        MessageRead.user_id == user2_id,
+        MessageRead.user_id == user_two_id,
     ).one()
-    assert mr.last_read_message_id == msg_id
+
+    assert read_state.last_read_message_id == message_id
 
 
-def test_ws_read_rejects_message_not_in_room(client: TestClient, db_session: Session):
-    u, p = _unique_user()
-    _register(client, u, p)
-    token = _login_and_get_token(client, u, p)
+def test_ws_read_rejects_message_not_in_room(
+    client: TestClient,
+    db_session: Session,
+):
+    """
+    Verify that a WebSocket read event is rejected when the message
+    does not belong to the connected room.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
 
-    room_id = _create_public_room(client, token)
-    _join_room(client, token, room_id)
+    room_a = create_room(client, token, "read-room-a")
+    room_a_id = room_a["id"]
+    join_room(client, token, room_a_id)
 
-    # Create a message in room A
-    msg_id = _post_message(client, token, room_id, "a")
+    message_id = _post_message(client, token, room_a_id, "a")
 
-    # Create room B
-    room_id_b = _create_public_room(client, token)
-    _join_room(client, token, room_id_b)
+    room_b = create_room(client, token, "read-room-b")
+    room_b_id = room_b["id"]
+    join_room(client, token, room_b_id)
 
-    # WS connected to room B tries to mark read using msg from room A -> should error
-    with client.websocket_connect(f"/ws/rooms/{room_id_b}?token={token}") as ws:
-        ws.receive_json()  # connected
-        ws.send_json({"type": "read", "message_id": msg_id})
-        out = ws.receive_json()
-        assert out["type"] == "error"
-        assert "room" in out.get("detail", "").lower() or "not found" in out.get("detail", "").lower()
+    with client.websocket_connect(f"/ws/rooms/{room_b_id}?token={token}") as ws:
+        ws.receive_json()
+        ws.send_json({"type": READ_EVENT_TYPE, "message_id": message_id})
+
+        payload = ws.receive_json()
+        assert payload["type"] == ERROR_EVENT_TYPE
+        assert (
+            "room" in payload.get("detail", "").lower()
+            or "not found" in payload.get("detail", "").lower()
+        )
+
+
+def test_ws_invalid_read_payload_stays_connected(
+    client: TestClient,
+    db_session: Session,
+):
+    """
+    Verify that an invalid read payload returns an error but does not
+    close the WebSocket connection.
+    """
+    username, password = unique_user()
+    register(client, username, password)
+    token = login(client, username, password)["access_token"]
+
+    room = create_room(client, token, "read-room-4")
+    room_id = room["id"]
+    join_room(client, token, room_id)
+
+    with client.websocket_connect(f"/ws/rooms/{room_id}?token={token}") as ws:
+        connected_payload = ws.receive_json()
+        assert connected_payload["type"] == CONNECTED_EVENT_TYPE
+
+        ws.send_json({"type": READ_EVENT_TYPE})
+        error_payload = ws.receive_json()
+        assert error_payload["type"] == ERROR_EVENT_TYPE
+
+        ws.send_json({"type": PING_EVENT_TYPE})
+        pong_payload = ws.receive_json()
+        assert pong_payload["type"] == PONG_EVENT_TYPE
