@@ -1,4 +1,4 @@
-# Real-Time Chat Backend
+# Real-Time Chat System
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![FastAPI](https://img.shields.io/badge/FastAPI-framework-green)
@@ -7,21 +7,20 @@
 ![WebSockets](https://img.shields.io/badge/realtime-WebSockets-purple)
 ![Tests](https://img.shields.io/badge/tests-pytest-success)
 
-A real-time chat backend built with FastAPI, SQLAlchemy, PostgreSQL, and WebSockets.
+A fullstack real-time chat application built with FastAPI, PostgreSQL, WebSockets, and a frontend client.
 
-The system implements a complete chat service including:
+## Features
 
-* authentication with JWT
-* refresh token rotation
-* public and private chat rooms
-* real-time messaging
-* read receipts
-* rate limiting
-* cursor-based pagination
-* database migrations
-* automated test coverage
-
-The project is designed to demonstrate **modern backend architecture and engineering practices**.
+- JWT authentication
+- Refresh token rotation
+- Public and private chat rooms
+- Real-time messaging with WebSockets
+- Read receipts and unread tracking
+- Token-bucket rate limiting
+- Cursor-based pagination
+- Alembic database migrations
+- Docker and Docker Compose support
+- Automated tests
 
 ---
 
