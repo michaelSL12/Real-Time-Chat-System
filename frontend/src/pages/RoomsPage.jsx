@@ -18,10 +18,11 @@ export default function RoomsPage() {
   const [error, setError] = useState("");
 
   // Load both the public room list and the current user's accessible rooms.
-  // The page uses both lists to determine which public rooms are still joinable.
+  // The page uses both lists to decide which public rooms are still joinable.
   const loadRooms = async () => {
     try {
       setError("");
+
       const [pub, mine] = await Promise.all([
         getPublicRooms(),
         getMyRooms(),
@@ -34,21 +35,25 @@ export default function RoomsPage() {
     }
   };
 
+  // Load the room data once when the page opens.
   useEffect(() => {
     loadRooms();
   }, []);
 
-  // Build a fast lookup of rooms the user already has access to.
+  // Build a quick lookup of the rooms the user already belongs to.
+  // This makes it easy to filter those rooms out of the public list.
   const myRoomIds = useMemo(() => {
     return new Set(myRooms.map((room) => room.id));
   }, [myRooms]);
 
-  // Public rooms that are already in "My rooms" should not appear
-  // again in the joinable public rooms section.
+  // Public rooms that already exist in "My rooms" should not appear again
+  // in the joinable public rooms section.
   const joinablePublicRooms = useMemo(() => {
     return publicRooms.filter((room) => !myRoomIds.has(room.id));
   }, [publicRooms, myRoomIds]);
 
+  // Create a new room using the current form values, then refresh the lists.
+  // After a successful creation, navigate directly into the new room.
   const handleCreate = async () => {
     if (!newRoomName.trim()) return;
 
@@ -66,8 +71,6 @@ export default function RoomsPage() {
 
       await loadRooms();
 
-      // Navigate directly into the room after successful creation
-      // so the user can start chatting immediately.
       if (createdRoom?.id) {
         navigate(`/rooms/${createdRoom.id}`);
       }
@@ -78,6 +81,8 @@ export default function RoomsPage() {
     }
   };
 
+  // Join a public room, then refresh the page data so the room moves
+  // from the public list into the user's own room list.
   const handleJoin = async (roomId) => {
     try {
       setLoading(true);
@@ -101,21 +106,27 @@ export default function RoomsPage() {
   };
 
   return (
-    <section className="card">
-      <h1>Rooms</h1>
+    <section className="card rooms-page">
+      <h1 className="rooms-title">Rooms</h1>
 
-      {error ? <p style={{ color: "red" }}>{error}</p> : null}
+      {error ? <div className="form-error">{error}</div> : null}
 
-      <h3>Create room</h3>
+      <h2 className="subsection-title">Create room</h2>
 
-      <div style={{ display: "flex", gap: "10px", marginBottom: "12px", flexWrap: "wrap" }}>
+      <div className="create-room-row">
         <input
+          className="room-name-input"
           value={newRoomName}
           onChange={(e) => setNewRoomName(e.target.value)}
           placeholder="Room name"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !loading && newRoomName.trim()) {
+              handleCreate();
+            }
+          }}
         />
 
-        <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+        <label className="room-privacy-label">
           <input
             type="checkbox"
             checked={isPrivate}
@@ -124,47 +135,64 @@ export default function RoomsPage() {
           Private room
         </label>
 
-        <button onClick={handleCreate} disabled={loading || !newRoomName.trim()}>
-          Create
+        <button
+          className="create-room-btn"
+          onClick={handleCreate}
+          disabled={loading || !newRoomName.trim()}
+        >
+          {loading ? "Creating..." : "Create"}
         </button>
       </div>
 
-      <h3>My rooms</h3>
+      <h2 className="subsection-title">My rooms</h2>
 
       {myRooms.length === 0 ? (
-        <p>No rooms yet.</p>
+        <p className="muted-text">No rooms yet.</p>
       ) : (
-        <ul>
+        <div className="rooms-list">
           {myRooms.map((room) => (
-            <li key={room.id} style={{ marginBottom: "10px" }}>
-              <strong>{room.name}</strong>{" "}
-              <span style={{ opacity: 0.7 }}>
-                ({room.is_private ? "Private" : "Public"})
-              </span>{" "}
-              <button onClick={() => openRoom(room)}>
+            <div key={room.id} className="room-item">
+              <div>
+                <div className="room-item-name">{room.name}</div>
+                <div className="room-item-meta">
+                  {room.is_private ? "Private" : "Public"}
+                </div>
+              </div>
+
+              <button
+                className="btn btn-light"
+                onClick={() => openRoom(room)}
+              >
                 Open
               </button>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
 
-      <h3>Public rooms</h3>
+      <h2 className="subsection-title">Public rooms</h2>
 
       {joinablePublicRooms.length === 0 ? (
-        <p>No public rooms to join.</p>
+        <p className="muted-text">No public rooms to join.</p>
       ) : (
-        <ul>
+        <div className="public-rooms-list">
           {joinablePublicRooms.map((room) => (
-            <li key={room.id} style={{ marginBottom: "10px" }}>
-              <strong>{room.name}</strong>{" "}
-              <span style={{ opacity: 0.7 }}>(Public)</span>{" "}
-              <button onClick={() => handleJoin(room.id)} disabled={loading}>
-                Join
+            <div key={room.id} className="room-item">
+              <div>
+                <div className="room-item-name">{room.name}</div>
+                <div className="room-item-meta">Public</div>
+              </div>
+
+              <button
+                className="btn btn-secondary"
+                onClick={() => handleJoin(room.id)}
+                disabled={loading}
+              >
+                {loading ? "Please wait..." : "Join"}
               </button>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
     </section>
   );

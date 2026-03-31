@@ -92,10 +92,11 @@ class MessageRead(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
 
     last_read_message_id = Column(
-        Integer,
-        ForeignKey("messages.id"),
-        nullable=False,
+    Integer,
+    ForeignKey("messages.id", ondelete="SET NULL"),
+    nullable=True,
     )
+    
     updated_at = Column(
         DateTime,
         default=datetime.utcnow,

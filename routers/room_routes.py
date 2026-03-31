@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from auth import get_current_user
 from database import get_db
 from models import Room, RoomMember, User
+from models.message import MessageRead
 from schemas import (
     RoomCreate,
     RoomInviteByUsername,
@@ -409,21 +410,6 @@ def delete_room(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, str]:
-    """
-    Delete a room owned by the current user.
-
-    Args:
-        room_id: ID of the room to delete.
-        db: Active database session injected by FastAPI.
-        current_user: Authenticated user attempting the deletion.
-
-    Returns:
-        Simple status response confirming deletion.
-
-    Raises:
-        HTTPException(404): If the room does not exist.
-        HTTPException(403): If the current user is not the room owner.
-    """
     room = db.get(Room, room_id)
     if not room:
         raise HTTPException(
@@ -437,12 +423,16 @@ def delete_room(
             detail=DETAIL_ONLY_OWNER_CAN_DELETE,
         )
 
+    db.query(MessageRead).filter(MessageRead.room_id == room_id).delete(
+        synchronize_session=False
+    )
+
     db.delete(room)
     db.commit()
 
     return {"status": STATUS_DELETED}
 
-
+    
 @router.patch("/rooms/{room_id}/my-nickname")
 def update_my_room_nickname(
     room_id: int,

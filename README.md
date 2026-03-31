@@ -504,15 +504,16 @@ Login and registration flow for secure user access.
 
 ![Authentication](./screenshots/login.png)
 
+### Room Management
+Support for public and private rooms with user-based access control.
+
+![Room Page](./screenshots/room-page.png)
+
 ### Real-Time Messaging
 Live chat interface with WebSocket-based communication.
 
 ![Chat Room](./screenshots/chat-room.png)
 
-### Room Management
-Support for public and private rooms with user-based access control.
-
-![Private Room](./screenshots/private-room.png)
 
 ---
 

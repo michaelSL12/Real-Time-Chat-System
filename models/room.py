@@ -9,7 +9,12 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    event,
+    select
 )
+
+from models.user import User
+
 from sqlalchemy.orm import relationship
 
 from database import Base
